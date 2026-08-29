@@ -212,6 +212,28 @@ def _append_equal_segments(segments, full, start, end, run_spans):
             break
 
 
+# ---------------- 诉讼地位角色（我方角色 ↔ 对方角色） ----------------
+# 委托人不一定是原告：一审可能是被告，二审可能是被上诉人，再审可能是被申请人，
+# 执行可能是被执行人。选定我方角色后，对方角色自动取反。
+ROLE_PAIRS = {
+    "原告": "被告", "被告": "原告",
+    "上诉人": "被上诉人", "被上诉人": "上诉人",
+    "再审申请人": "再审被申请人", "再审被申请人": "再审申请人",
+    "申请执行人": "被执行人", "被执行人": "申请执行人",
+    "申请人": "被申请人", "被申请人": "申请人",
+}
+
+# 程序阶段 → 该阶段可选的诉讼地位（前端按代理阶段联动过滤下拉）
+STAGE_ROLES = {
+    "一审": ["原告", "被告"],
+    "二审": ["上诉人", "被上诉人"],
+    "再审": ["再审申请人", "再审被申请人"],
+    "再审申请": ["再审申请人", "再审被申请人"],
+    "执行": ["申请执行人", "被执行人"],
+    "仲裁": ["申请人", "被申请人"],
+}
+
+
 # ---------------- 字段定义（网页表单与模板映射共用） ----------------
 
 FIELD_DEFS = [
@@ -222,7 +244,8 @@ FIELD_DEFS = [
     {"key": "client_address", "label": "住址/住所", "group": "both", "required": True},
     {"key": "client_id", "label": "身份证号/统一社会信用代码", "group": "both", "required": True},
     {"key": "client_phone", "label": "委托人联系电话", "group": "both", "required": True},
-    {"key": "opponent_name", "label": "被告姓名（对方当事人）", "group": "both", "required": True},
+    {"key": "opponent_name", "label": "对方当事人姓名/名称", "group": "both", "required": True},
+    {"key": "client_role", "label": "我方当事人诉讼地位", "group": "both", "required": True},
     {"key": "case_reason", "label": "案由", "group": "both", "required": True},
     {"key": "agency_stage", "label": "代理阶段", "group": "both", "required": True},
     {"key": "auth_scope", "label": "代理权限", "group": "both", "required": True},
@@ -236,9 +259,11 @@ FIELD_DEFS = [
 ]
 
 # 关键词 → 字段key 的自动映射规则（上传模板时预填建议）
-# 注意顺序：【被告姓名】须先于【...姓名】；【法定代表人职务】须先于【法定代表人】；
-# 【法定代表人姓名】须先于【...姓名】，否则会误映射
+# 注意顺序：【委托人角色/对方角色】须排在最前（"对方角色"含"对方"，不能先被"对方→被告"规则吃掉）；
+# 【被告姓名】须先于【...姓名】；【法定代表人职务】须先于【法定代表人】；【法定代表人姓名】须先于【...姓名】
 _AUTO_RULES = [
+    (("委托人角色", "我方角色", "我方当事人角色", "诉讼地位"), "client_role"),
+    (("对方角色", "对方当事人角色"), "opponent_role"),
     (("被告", "对方当事人", "对方"), "opponent_name"),
     (("职务",), "legal_rep_duty"),
     (("法定代表人", "法定代表"), "legal_rep"),

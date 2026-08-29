@@ -125,6 +125,11 @@ def api_fields():
     return jsonify({"fields": docgen.FIELD_DEFS})
 
 
+@app.route("/api/roles")
+def api_roles():
+    return jsonify({"role_pairs": docgen.ROLE_PAIRS, "stage_roles": docgen.STAGE_ROLES})
+
+
 @app.route("/api/templates")
 def api_templates():
     return jsonify({"templates": template_list()})
@@ -215,7 +220,9 @@ def api_generate():
     if ctype == "company" and not values.get("legal_rep_duty"):
         return jsonify({"error": "法人客户需填写法定代表人职务"}), 400
     if not values.get("opponent_name"):
-        return jsonify({"error": "被告姓名为必填项"}), 400
+        return jsonify({"error": "对方当事人姓名/名称为必填项"}), 400
+    if not values.get("client_role"):
+        return jsonify({"error": "我方当事人诉讼地位为必填项"}), 400
     if not values.get("case_reason"):
         return jsonify({"error": "案由为必填项"}), 400
     if not values.get("agency_stage"):
@@ -225,6 +232,11 @@ def api_generate():
 
     # 证件号码标签：自然人→身份证号码；法人→统一社会信用代码
     values["client_id_label"] = "身份证号码" if ctype == "person" else "统一社会信用代码"
+
+    # 对方当事人诉讼地位：按我方角色自动取反（原告↔被告 / 上诉人↔被上诉人 / …）
+    values["opponent_role"] = docgen.ROLE_PAIRS.get(values.get("client_role", ""), "")
+    if not values["opponent_role"]:
+        return jsonify({"error": "未识别我方当事人诉讼地位，请重新选择"}), 400
 
     # 日期：一个日期输入拆成 年/月/日 三个字段
     d = values.get("sign_date") or date.today().isoformat()

@@ -172,6 +172,30 @@ async function loadFields(){
   j.fields.forEach(f => FIELD_LABELS[f.key]=f.label);
 }
 
+let ROLES = {role_pairs:{}, stage_roles:{}};
+async function loadRoles(){
+  try{
+    ROLES = await fetch('/api/roles').then(r=>r.json());
+  }catch(e){}
+}
+function rolesForStage(stage){
+  stage = (stage||'').trim();
+  if(!stage) return [];
+  if(ROLES.stage_roles[stage]) return ROLES.stage_roles[stage];
+  for(const key in ROLES.stage_roles){
+    if(stage.includes(key) || key.includes(stage)) return ROLES.stage_roles[key];
+  }
+  return [];
+}
+function fillRoleOptions(){
+  const sel = $('#f_client_role'); if(!sel) return;
+  const stage = ($('#f_agency_stage')||{}).value || '';
+  const cur = sel.value;
+  const roles = rolesForStage(stage);
+  sel.innerHTML = '<option value="">（请先选代理阶段）</option>' +
+    roles.map(r=>'<option value="'+r+'"'+(r===cur?' selected':'')+'>'+r+'</option>').join('');
+}
+
 function renderFields(){
   const g = $('#fields'); g.innerHTML='';
   const isCompany = state.type==='company';
@@ -179,7 +203,8 @@ function renderFields(){
     ['client_name','委托人姓名 / 名称',true],
     ['client_id', isCompany?'统一社会信用代码':'身份证号码',true],
     ['client_address','住址 / 住所',true],
-    ['opponent_name','被告姓名（对方当事人）',true],
+    ['opponent_name','对方当事人姓名 / 名称',true],
+    ['client_role','我方当事人诉讼地位',true],
     ['case_reason','案由（如：民间借贷）',true],
     ['agency_stage','代理阶段（如：一审、二审、执行）',true],
     ['auth_scope','代理权限',true],
@@ -193,11 +218,20 @@ function renderFields(){
     if((k==='legal_rep'||k==='legal_rep_duty') && !isCompany) return;
     const div = document.createElement('div');
     div.className = 'field'+((k==='client_address'||k==='case_reason')?' full':'');
+    if(k==='client_role'){
+      div.innerHTML = '<label>'+label+(req?' <span class="req">*</span>':'')+'</label>'+
+        '<select id="f_client_role"></select>';
+      g.appendChild(div);
+      fillRoleOptions();
+      return;
+    }
     const dl = k==='agency_stage' ? ' list="stage-list"' : '';
     div.innerHTML = '<label>'+label+(req?' <span class="req">*</span>':'')+'</label>'+
       '<input id="f_'+k+'"'+dl+' value="'+(state.fields[k]||'')+'">';
     g.appendChild(div);
   });
+  const stageInput = $('#f_agency_stage');
+  if(stageInput) stageInput.addEventListener('input', fillRoleOptions);
   if(isCompany) noteLegalRep();
 }
 function noteLegalRep(){
@@ -275,13 +309,14 @@ $('#btn-back').onclick = () => show('card1');
 
 $('#btn-gen').onclick = async () => {
   const fields = {};
-  document.querySelectorAll('#fields input').forEach(i => fields[i.id.slice(2)] = i.value.trim());
+  document.querySelectorAll('#fields input, #fields select').forEach(i => fields[i.id.slice(2)] = i.value.trim());
   const w = $('#formwarn'); w.style.display='none';
   const miss = [];
   if(!fields.client_name) miss.push('委托人姓名/名称');
   if(!fields.client_id) miss.push('证件号码');
   if(!fields.client_address) miss.push('住址/住所');
-  if(!fields.opponent_name) miss.push('被告姓名');
+  if(!fields.opponent_name) miss.push('对方当事人');
+  if(!fields.client_role) miss.push('我方诉讼地位');
   if(!fields.case_reason) miss.push('案由');
   if(!fields.agency_stage) miss.push('代理阶段');
   if(!fields.auth_scope) miss.push('代理权限');
@@ -395,7 +430,7 @@ $('#btn-savemap').onclick = async () => {
   }catch(e){ alert(e.message); }
 };
 
-loadFields().then(()=>{});
+loadFields(); loadRoles();
 </script>
 </body>
 </html>

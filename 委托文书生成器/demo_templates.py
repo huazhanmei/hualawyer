@@ -95,7 +95,7 @@ def make_authorization():
     _add_para(doc, "【证件号码类型】：【身份证号】")
     _add_para(doc, "住址/住所：【住址】")
     _add_para(doc, "受托人：%s　律师" % FIRM)
-    _add_para(doc, "原告【委托人姓名】与被告【被告姓名】【案由】纠纷一案，"
+    _add_para(doc, "【委托人角色】【委托人姓名】与【对方角色】【被告姓名】【案由】纠纷一案，"
                    "现委托上述受托人在【代理阶段】阶段作为我方委托诉讼代理人。")
     _add_para(doc, "代理权限：【代理权限】。")
     _add_para(doc, "")
@@ -110,8 +110,7 @@ def make_legal_rep():
     doc = _base_doc()
     _title(doc, "法定代表人身份证明")
     _add_para(doc, "兹证明【法定代表人姓名】在我司任【法定代表人职务】职务，"
-                   "系我司（【委托人名称】，统一社会信用代码：【统一社会信用代码】）的法定代表人。")
-    _add_para(doc, "单位住所：【委托人住所】")
+                   "系我司法定代表人。")
     _add_para(doc, "特此证明。")
     _add_para(doc, "")
     _add_para(doc, "【年】年【月】月【日】日", indent=False)
