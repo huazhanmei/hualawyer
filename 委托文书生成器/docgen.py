@@ -5,9 +5,18 @@
 占位符写法：【任意文字】（全角方括号），由"模板管理"页建立 占位符 → 数据字段 的映射。
 """
 import re
+
 from docx import Document
+from docx.oxml.ns import qn
 
 TOKEN_RE = re.compile(r"【[^】]{1,30}】")
+
+# 证件号码组合标签：如"公民身份号码/统一社会信用代码"、"身份证号/统一社会信用代码"
+# 生成时按当事人类型替换为单一标签（自然人→身份证号码；法人→统一社会信用代码）
+_LABEL_COMBO_RE = re.compile(r"(?:公民身份号码|身份证号码|身份证号|身份号码)\s*/\s*统一社会信用代码")
+# 组合标签 + 冒号且后面没有占位符（模板漏写【身份证号】的情形）→ 标签后直接补证件号
+_LABEL_COMBO_TAIL_RE = re.compile(
+    r"((?:公民身份号码|身份证号码|身份证号|身份号码)\s*/\s*统一社会信用代码)(\s*[:：][\s\u3000]*)$")
 
 
 def _iter_paragraphs(doc):
@@ -48,6 +57,19 @@ def fill_template(template_path, token_map, values, out_path):
     doc = Document(template_path)
 
     def substitute(text):
+        label = values.get("client_id_label")
+        id_no = values.get("client_id")
+        if label:
+            # 情形一：组合标签+冒号位于段尾且无占位符 → 直接补上证件号
+            if id_no:
+                m = _LABEL_COMBO_TAIL_RE.search(text)
+                if m:
+                    text = text[:m.start()] + label + m.group(2) + str(id_no)
+            # 情形二：普通组合标签 → 替换为单一标签（占位符保留，走下方正常填充）
+            text = _LABEL_COMBO_RE.sub(label, text)
+            # 情形三：显式【证件号码类型】占位符
+            text = text.replace("【证件号码类型】", str(label))
+
         def repl(m):
             key = token_map.get(m.group(0))
             if not key:
@@ -61,7 +83,9 @@ def fill_template(template_path, token_map, values, out_path):
     replaced = 0
     for p in _iter_paragraphs(doc):
         full = "".join(r.text for r in p.runs)
-        if "【" not in full or "】" not in full:
+        has_token = "【" in full and "】" in full
+        has_label = _LABEL_COMBO_RE.search(full) is not None
+        if not has_token and not has_label:
             continue
         new_text = substitute(full)
         if new_text == full:
@@ -87,11 +111,13 @@ FIELD_DEFS = [
     {"key": "client_birth", "label": "出生日期", "group": "person", "required": False},
     {"key": "client_address", "label": "住址/住所", "group": "both", "required": True},
     {"key": "client_id", "label": "身份证号/统一社会信用代码", "group": "both", "required": True},
-    {"key": "client_phone", "label": "联系电话", "group": "both", "required": False},
-    {"key": "legal_rep", "label": "法定代表人姓名", "group": "company", "required": True},
-    {"key": "legal_rep_duty", "label": "法定代表人职务", "group": "company", "required": False},
+    {"key": "client_phone", "label": "委托人联系电话", "group": "both", "required": True},
+    {"key": "opponent_name", "label": "被告姓名（对方当事人）", "group": "both", "required": True},
     {"key": "case_reason", "label": "案由", "group": "both", "required": True},
+    {"key": "agency_stage", "label": "代理阶段", "group": "both", "required": True},
     {"key": "auth_scope", "label": "代理权限", "group": "both", "required": True},
+    {"key": "legal_rep", "label": "法定代表人姓名", "group": "company", "required": True},
+    {"key": "legal_rep_duty", "label": "法定代表人职务", "group": "company", "required": True},
     {"key": "contract_no", "label": "合同编号", "group": "both", "required": False},
     {"key": "sign_date", "label": "签订日期", "group": "both", "required": False},
     {"key": "sign_year", "label": "日期·年", "group": "both", "required": False},
@@ -100,17 +126,21 @@ FIELD_DEFS = [
 ]
 
 # 关键词 → 字段key 的自动映射规则（上传模板时预填建议）
+# 注意顺序：【被告姓名】须先于【...姓名】；【法定代表人职务】须先于【法定代表人】；
+# 【法定代表人姓名】须先于【...姓名】，否则会误映射
 _AUTO_RULES = [
-    (("姓名", "委托人名", "甲方名"), "client_name"),
+    (("被告", "对方当事人", "对方"), "opponent_name"),
+    (("职务",), "legal_rep_duty"),
+    (("法定代表人", "法定代表"), "legal_rep"),
+    (("姓名", "委托人名", "甲方名", "委托人名称"), "client_name"),
     (("性别",), "client_gender"),
     (("民族",), "client_ethnicity"),
     (("出生",), "client_birth"),
     (("住址", "住所", "地址", "营业场所"), "client_address"),
     (("身份证", "身份号码", "证号", "信用代码", "信用证号"), "client_id"),
     (("电话", "联系方式", "手机"), "client_phone"),
-    (("法定代表人", "法定代表"), "legal_rep"),
-    (("职务",), "legal_rep_duty"),
     (("案由", "纠纷", "案件"), "case_reason"),
+    (("代理阶段", "审理阶段", "诉讼阶段"), "agency_stage"),
     (("权限", "授权"), "auth_scope"),
     (("编号", "合同号"), "contract_no"),
     (("签订日期", "签署日期", "日期"), "sign_date"),
@@ -126,8 +156,43 @@ def guess_field(token):
         return "sign_month"
     if inner == "日":
         return "sign_day"
+    if "证件号码类型" in inner:
+        return None  # 由 fill_template 按当事人类型动态填充，无需映射
     for keywords, key in _AUTO_RULES:
         for kw in keywords:
             if kw in inner:
                 return key
     return None
+
+
+def _set_eastasia(run, font):
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = rPr.makeelement(qn("w:rFonts"), {})
+        rPr.append(rFonts)
+    rFonts.set(qn("w:eastAsia"), font)
+
+
+def fix_eastasia_fonts(path, body_font="仿宋", title_font="宋体"):
+    """修复 textutil 转换 .doc→.docx 后中文字体标记丢失的问题。
+
+    首个非空段落视为标题（宋体加粗），其余正文统一设中文字体（默认仿宋）。
+    西文字体与字号保留转换结果。
+    """
+    doc = Document(path)
+    title_done = False
+    for p in _iter_paragraphs(doc):
+        text = "".join(r.text for r in p.runs)
+        if not text.strip():
+            continue
+        if not title_done:
+            for r in p.runs:
+                _set_eastasia(r, title_font)
+                if r.font.bold is None:
+                    r.font.bold = True
+            title_done = True
+        else:
+            for r in p.runs:
+                _set_eastasia(r, body_font)
+    doc.save(path)

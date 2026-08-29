@@ -18,6 +18,42 @@ _NEXT_LABELS = (
     "参保人数|电话|邮箱|官网|所属行业|企业类型|成立日期|注册资本|"
     "登记机关|核准日期|登记状态|人员规模|英文名|股东信息|主要人员"
 )
+# 已知字段标签词：从姓名/职务候选值中剔除，防止 OCR 多列挤同行时误吞
+_LABEL_WORDS = (
+    "统一社会信用代码", "纳税人识别号", "经营范围", "曾用名", "组织机构代码",
+    "参保人数", "电话", "邮箱", "官网", "所属行业", "企业类型", "成立日期",
+    "注册资本", "登记机关", "核准日期", "登记状态", "人员规模", "英文名",
+    "股东信息", "主要人员", "注册地址", "法定代表人", "职务", "不详", "暂无",
+)
+# 兜底：地址标签缺失时（企查查移动端 App 截图，地址直接跟在地图图标后），
+# 按中国地址格式在 OCR 文本中查找。规则：含"市"且含"路/街/道/巷"且含"号"。
+_ADDR_FALLBACK_RE = re.compile(
+    r"[\u4e00-\u9fa5]{2,8}市[\u4e00-\u9fa5A-Za-z0-9·]{1,30}(?:路|街|道|巷)[\u4e00-\u9fa5A-Za-z0-9]{1,20}号[\u4e00-\u9fa5A-Za-z0-9号座栋单元层室楼-]*"
+)
+# 兜底：职务标签缺失时（人员区"姓名+职务"同行布局），按常见职务词匹配
+# 注意：Python re 的 alternation 按列表顺序优先匹配，所以长的词必须排在前面，
+# 否则短词（如"董事"）会先吃掉匹配位，导致"执行董事兼总经理"被截成"董事"。
+_DUTY_FALLBACK_RE = re.compile(
+    r"执行董事兼总经理|董事长兼总经理|执行董事|副董事长|"
+    r"董事长|总经理|副总经理|董事|经理|副经理|监事长|监事|"
+    r"财务负责人|法定代表人"
+)
+# 排除区块：这些行/上下文里的地址/职务不应作为企业基本信息采纳
+_BLOCK_WORDS = ("风险", "股东", "人员", "动态", "历史信息", "自身", "关联", "扫", "描", "提示", "发票")
+
+
+def _trim_label_words(s):
+    """把候选值里混入的后续标签词截掉；若整个值都是标签词则返回 None。"""
+    if not s:
+        return None
+    for w in _LABEL_WORDS:
+        idx = s.find(w)
+        if idx == 0:
+            return None
+        if idx > 0:
+            s = s[:idx]
+    s = s.strip("：:，,、")
+    return s if len(s) >= 2 else None
 COMPANY_SUFFIX = (
     "公司|企业|集团|厂|中心|合作社|事务所|银行|商店|商场|"
     "研究院|研究所|医院|学校|大学|俱乐部|工作室|合伙"
@@ -112,13 +148,47 @@ def parse_company(lines):
                 fields["client_name"] = m2.group(0)
                 break
 
-    m = re.search(r"法定代表人[：:]?([\u4e00-\u9fa5·]{2,10})", joined)
+    # 法定代表人：兼容三种 OCR 布局——
+    # ① 同行（"法定代表人 王海川"）② 带冒号（"法定代表人：王海川"）
+    # ③ 分行（标签一列、姓名一列，企查查 App 截图常见："法定代表人\n王海川"）
+    # 同行用懒惰匹配+标签前瞻，防止多列挤同行时把后续标签吞进姓名
+    _look = "(?=%s|职务|法定代表人|\\n|$)" % _NEXT_LABELS
+    m = re.search(r"法定代表人[：:]?([\u4e00-\u9fa5·]{2,10}?)" + _look, joined)
     if m:
-        fields["legal_rep"] = m.group(1)
+        name = _trim_label_words(m.group(1))
+        if name:
+            fields["legal_rep"] = name
+    if "legal_rep" not in fields:
+        m = re.search(r"法定代表人[：:]?[ \t]*\n[ \t]*([\u4e00-\u9fa5·]{2,10})\n", joined)
+        if m:
+            name = _trim_label_words(m.group(1))
+            if name:
+                fields["legal_rep"] = name
 
+    # 职务：兼容标签同行/分行/缺失三种 OCR 布局
     m = re.search(r"职务[：:]?([\u4e00-\u9fa5]{2,10})", joined)
     if m:
-        fields["legal_rep_duty"] = m.group(1)
+        duty = _trim_label_words(m.group(1))
+        if duty:
+            fields["legal_rep_duty"] = duty
+    if "legal_rep_duty" not in fields:
+        m = re.search(r"职务[：:]?[ \t]*\n[ \t]*([\u4e00-\u9fa5]{2,10})\n", joined)
+        if m:
+            duty = _trim_label_words(m.group(1))
+            if duty:
+                fields["legal_rep_duty"] = duty
+    # 兜底：人员区"姓名+职务"同行布局（如"谢云峰 执行董事兼总经理"）
+    if "legal_rep_duty" not in fields and fields.get("legal_rep"):
+        rep = re.escape(fields["legal_rep"])
+        for ln in lines:
+            if rep in ln:
+                if any(b in ln for b in _BLOCK_WORDS):
+                    continue
+                tail = ln.split(rep, 1)[-1]  # 姓名之后的内容
+                m2 = _DUTY_FALLBACK_RE.search(tail)
+                if m2:
+                    fields["legal_rep_duty"] = m2.group(0)
+                    break
 
     m = re.search(
         r"(?:注册地址|住所|企业住所|经营场所|注册地|主要经营场所)[：:]?(.*?)(?=%s|$)" % _NEXT_LABELS,
@@ -127,6 +197,20 @@ def parse_company(lines):
         addr = re.sub(r"[\s　\n]+", "", m.group(1))
         if 4 <= len(addr) <= 60:
             fields["client_address"] = addr
+    # 兜底：企查查移动端 App 截图，地址标签缺失，地址直接跟在地图图标后
+    if "client_address" not in fields:
+        for ln in lines:
+            ln_clean = re.sub(r"[\s　]+", "", ln)
+            if any(b in ln for b in _BLOCK_WORDS):
+                continue
+            m2 = _ADDR_FALLBACK_RE.search(ln_clean)
+            if m2:
+                cand = m2.group(0)
+                # 去掉行首的杂字符（如 ◎、● 等图标）
+                cand = re.sub(r"^[^一-龥A-Za-z]+", "", cand)
+                if 6 <= len(cand) <= 60:
+                    fields["client_address"] = cand
+                    break
 
     return fields
 

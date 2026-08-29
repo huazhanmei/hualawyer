@@ -46,7 +46,42 @@ def save_mappings(m):
         json.dump(m, f, ensure_ascii=False, indent=2)
 
 
+def convert_doc_templates():
+    """把 WPS/Word 保存的 .doc 模板自动转为 .docx（textutil），原文件归档到 doc_originals/。
+
+    python-docx 只能读取 .docx；华律师用 WPS 另存的 .doc 放入 templates_docx/
+    后，下次启动或刷新模板列表时自动转换并修复中文字体标记。
+    """
+    import subprocess
+    converted = []
+    for fn in sorted(os.listdir(TPL_DIR)):
+        if not fn.endswith(".doc") or fn.startswith("~$") or fn.startswith("."):
+            continue
+        src = os.path.join(TPL_DIR, fn)
+        dst = os.path.join(TPL_DIR, fn[:-4] + ".docx")
+        if not os.path.exists(dst):
+            try:
+                subprocess.run(
+                    ["textutil", "-convert", "docx", "-output", dst, src],
+                    check=True, timeout=60, capture_output=True)
+                docgen.fix_eastasia_fonts(dst)
+                converted.append(fn)
+            except Exception as e:  # noqa: BLE001
+                print("模板转换失败 %s：%s" % (fn, e))
+                continue
+        # 原始 .doc 移入归档目录，避免与 .docx 混淆
+        arc_dir = os.path.join(TPL_DIR, "doc_originals")
+        os.makedirs(arc_dir, exist_ok=True)
+        try:
+            shutil.move(src, os.path.join(arc_dir, fn))
+        except OSError:
+            pass
+    return converted
+
+
 def template_list():
+    # 先转换 .doc，避免 ensure_demo_templates 因无 .docx 而生成同名示例模板
+    convert_doc_templates()
     ensure_demo_templates()
     mappings = load_mappings()
     items = []
@@ -159,8 +194,19 @@ def api_generate():
         return jsonify({"error": "身份证号校验位不符，请核对后重试"}), 400
     if ctype == "company" and not values.get("legal_rep"):
         return jsonify({"error": "法人客户需填写法定代表人姓名"}), 400
+    if ctype == "company" and not values.get("legal_rep_duty"):
+        return jsonify({"error": "法人客户需填写法定代表人职务"}), 400
+    if not values.get("opponent_name"):
+        return jsonify({"error": "被告姓名为必填项"}), 400
     if not values.get("case_reason"):
         return jsonify({"error": "案由为必填项"}), 400
+    if not values.get("agency_stage"):
+        return jsonify({"error": "代理阶段为必填项"}), 400
+    if not values.get("client_phone"):
+        return jsonify({"error": "委托人联系电话为必填项"}), 400
+
+    # 证件号码标签：自然人→身份证号码；法人→统一社会信用代码
+    values["client_id_label"] = "身份证号码" if ctype == "person" else "统一社会信用代码"
 
     # 日期：一个日期输入拆成 年/月/日 三个字段
     d = values.get("sign_date") or date.today().isoformat()
@@ -168,6 +214,7 @@ def api_generate():
     if m:
         values["sign_year"], values["sign_month"], values["sign_day"] = m.groups()
 
+    convert_doc_templates()
     ensure_demo_templates()
     mappings = load_mappings()
     available = {it["filename"] for it in template_list()}
@@ -227,6 +274,9 @@ def open_output():
 if __name__ == "__main__":
     os.makedirs(OUT_DIR, exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    converted = convert_doc_templates()
     ensure_demo_templates()
+    if converted:
+        print("已自动转换 .doc 模板：%s" % "、".join(converted))
     print("委托文书生成器已启动：http://127.0.0.1:5092")
     app.run(host="127.0.0.1", port=5092, debug=False)

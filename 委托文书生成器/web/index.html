@@ -140,6 +140,10 @@
     </div>
   </div>
 
+  <datalist id="stage-list">
+    <option value="一审"> <option value="二审"> <option value="再审">
+    <option value="再审申请"> <option value="执行"> <option value="仲裁">
+  </datalist>
   <footer>身份证号本地校验 · 生成文件在 output 目录 · 仅限本机使用</footer>
 </div>
 
@@ -170,28 +174,31 @@ async function loadFields(){
 
 function renderFields(){
   const g = $('#fields'); g.innerHTML='';
+  const isCompany = state.type==='company';
   const defs = [
     ['client_name','委托人姓名 / 名称',true],
-    ['client_id', state.type==='company'?'统一社会信用代码':'身份证号',true],
+    ['client_id', isCompany?'统一社会信用代码':'身份证号码',true],
     ['client_address','住址 / 住所',true],
+    ['opponent_name','被告姓名（对方当事人）',true],
     ['case_reason','案由（如：民间借贷）',true],
+    ['agency_stage','代理阶段（如：一审、二审、执行）',true],
     ['auth_scope','代理权限',true],
-    ['client_phone','联系电话',false],
-    ['legal_rep','法定代表人姓名', state.type==='company'],
-    ['legal_rep_duty','法定代表人职务',false],
+    ['client_phone','委托人联系电话',true],
+    ['legal_rep','法定代表人姓名',isCompany],
+    ['legal_rep_duty','法定代表人职务（如：执行董事、总经理）',isCompany],
     ['contract_no','合同编号（可选）',false],
     ['sign_date','签订日期（YYYY-MM-DD，默认今天）',false],
   ];
   defs.forEach(([k,label,req])=>{
-    if(k==='legal_rep' && state.type!=='company') return;
-    if(k==='legal_rep_duty' && state.type!=='company') return;
+    if((k==='legal_rep'||k==='legal_rep_duty') && !isCompany) return;
     const div = document.createElement('div');
-    div.className = 'field'+(k==='client_address'?' full':'');
+    div.className = 'field'+((k==='client_address'||k==='case_reason')?' full':'');
+    const dl = k==='agency_stage' ? ' list="stage-list"' : '';
     div.innerHTML = '<label>'+label+(req?' <span class="req">*</span>':'')+'</label>'+
-      '<input id="f_'+k+'" value="'+(state.fields[k]||'')+'">';
+      '<input id="f_'+k+'"'+dl+' value="'+(state.fields[k]||'')+'">';
     g.appendChild(div);
   });
-  if(state.type==='company') noteLegalRep();
+  if(isCompany) noteLegalRep();
 }
 function noteLegalRep(){
   const w = $('#formwarn');
@@ -274,9 +281,15 @@ $('#btn-gen').onclick = async () => {
   if(!fields.client_name) miss.push('委托人姓名/名称');
   if(!fields.client_id) miss.push('证件号码');
   if(!fields.client_address) miss.push('住址/住所');
+  if(!fields.opponent_name) miss.push('被告姓名');
   if(!fields.case_reason) miss.push('案由');
+  if(!fields.agency_stage) miss.push('代理阶段');
   if(!fields.auth_scope) miss.push('代理权限');
-  if(state.type==='company' && !fields.legal_rep) miss.push('法定代表人姓名');
+  if(!fields.client_phone) miss.push('委托人联系电话');
+  if(state.type==='company'){
+    if(!fields.legal_rep) miss.push('法定代表人姓名');
+    if(!fields.legal_rep_duty) miss.push('法定代表人职务');
+  }
   if(miss.length){ w.style.display='block'; w.textContent='必填项缺失：'+miss.join('、'); return; }
   $('#spin2').classList.remove('hidden');
   $('#btn-gen').disabled = true;
