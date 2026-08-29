@@ -46,14 +46,27 @@ def save_mappings(m):
         json.dump(m, f, ensure_ascii=False, indent=2)
 
 
+def _find_logo():
+    """在 assets/logo/ 下找第一张 PNG 作为律所 logo。"""
+    logo_dir = os.path.join(BASE, "assets", "logo")
+    if os.path.isdir(logo_dir):
+        for fn in sorted(os.listdir(logo_dir)):
+            if fn.lower().endswith(".png"):
+                return os.path.join(logo_dir, fn)
+    return None
+
+
 def convert_doc_templates():
     """把 WPS/Word 保存的 .doc 模板自动转为 .docx（textutil），原文件归档到 doc_originals/。
 
     python-docx 只能读取 .docx；华律师用 WPS 另存的 .doc 放入 templates_docx/
     后，下次启动或刷新模板列表时自动转换并修复中文字体标记。
+    注意：textutil 会丢失页眉 logo 与页脚页码，故转换后尝试从 assets/logo/ 注入 logo；
+    如需 100% 保留格式（含页码），请用 WPS「另存为 .docx」而非 .doc。
     """
     import subprocess
     converted = []
+    logo = _find_logo()
     for fn in sorted(os.listdir(TPL_DIR)):
         if not fn.endswith(".doc") or fn.startswith("~$") or fn.startswith("."):
             continue
@@ -65,6 +78,11 @@ def convert_doc_templates():
                     ["textutil", "-convert", "docx", "-output", dst, src],
                     check=True, timeout=60, capture_output=True)
                 docgen.fix_eastasia_fonts(dst)
+                if logo:
+                    try:
+                        docgen.inject_header_logo(dst, logo)
+                    except Exception as e:  # noqa: BLE001
+                        print("注入 logo 失败 %s：%s" % (fn, e))
                 converted.append(fn)
             except Exception as e:  # noqa: BLE001
                 print("模板转换失败 %s：%s" % (fn, e))

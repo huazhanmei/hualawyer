@@ -4,6 +4,7 @@
 遍历范围：正文段落、表格单元格、页眉、页脚。
 占位符写法：【任意文字】（全角方括号），由"模板管理"页建立 占位符 → 数据字段 的映射。
 """
+import copy
 import re
 
 from docx import Document
@@ -48,58 +49,167 @@ def extract_tokens(path):
     return sorted(tokens)
 
 
+def _get_eastasia(run):
+    """读取 run 的中文字体名（w:rFonts/@w:eastAsia），无则返回 None。"""
+    rPr = run._element.find(qn("w:rPr"))
+    if rPr is None:
+        return None
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        return None
+    return rFonts.get(qn("w:eastAsia"))
+
+
+def _append_run(p, text, rpr):
+    """向段落 p 追加一个 run：格式复制自 rpr（可为 None），\t 保留为制表符。"""
+    r = p._p.makeelement(qn("w:r"), {})
+    if rpr is not None:
+        r.append(copy.deepcopy(rpr))
+    parts = text.split("\t")
+    for i, part in enumerate(parts):
+        if i > 0:
+            r.append(r.makeelement(qn("w:tab"), {}))
+        if part:
+            t = r.makeelement(qn("w:t"), {})
+            t.text = part
+            t.set(qn("xml:space"), "preserve")
+            r.append(t)
+    p._p.append(r)
+
+
+def _build_spans(full, token_map, values):
+    """找出段落文本 full 中所有需要替换的区间，返回 [(start, end, 替换文本)]。
+
+    覆盖三类：① 组合标签尾部（"身份证号/统一社会信用代码：" 段尾，补证号）
+    ② 组合标签（"身份证号/统一社会信用代码" → 单一标签）
+    ③ 【占位符】。区间按原文偏移给出，互不重叠。
+    """
+    spans = []
+    label = values.get("client_id_label")
+    id_no = values.get("client_id")
+
+    if label:
+        # ① 组合标签 + 冒号位于段尾 → 单一标签 + 冒号 + 证号
+        if id_no:
+            for m in _LABEL_COMBO_TAIL_RE.finditer(full):
+                spans.append((m.start(), m.end(), str(label) + m.group(2) + str(id_no)))
+        # ② 普通组合标签 → 单一标签（已被①覆盖的跳过）
+        for m in _LABEL_COMBO_RE.finditer(full):
+            covered = any(s <= m.start() and m.end() <= e for s, e, _ in spans)
+            if not covered:
+                spans.append((m.start(), m.end(), str(label)))
+        # ③ 显式【证件号码类型】占位符
+        for m in re.finditer(r"【证件号码类型】", full):
+            spans.append((m.start(), m.end(), str(label)))
+
+    # 普通【占位符】→ 字段值
+    for m in TOKEN_RE.finditer(full):
+        tok = m.group(0)
+        key = token_map.get(tok)
+        if not key:
+            continue  # 未映射的占位符原样保留
+        val = values.get(key)
+        if val is None or val == "":
+            continue  # 字段为空也保留占位符，便于人工补填
+        spans.append((m.start(), m.end(), str(val)))
+    return spans
+
+
 def fill_template(template_path, token_map, values, out_path):
     """token_map: {占位符: 字段key}；values: {字段key: 字符串值}。
 
-    替换策略：段落级重写 —— 合并该段全部 run 的文本后整体替换，
-    结果写回首 run 以保留其字体格式（占位符所在段落通常整段同格式）。
+    替换策略：run 级替换 —— 只重建"占位符/组合标签所在"的 run，
+    其余 run 原样保留，从而保留每个 run 的字体、加粗、制表符等局部格式。
     """
     doc = Document(template_path)
 
-    def substitute(text):
-        label = values.get("client_id_label")
-        id_no = values.get("client_id")
-        if label:
-            # 情形一：组合标签+冒号位于段尾且无占位符 → 直接补上证件号
-            if id_no:
-                m = _LABEL_COMBO_TAIL_RE.search(text)
-                if m:
-                    text = text[:m.start()] + label + m.group(2) + str(id_no)
-            # 情形二：普通组合标签 → 替换为单一标签（占位符保留，走下方正常填充）
-            text = _LABEL_COMBO_RE.sub(label, text)
-            # 情形三：显式【证件号码类型】占位符
-            text = text.replace("【证件号码类型】", str(label))
-
-        def repl(m):
-            key = token_map.get(m.group(0))
-            if not key:
-                return m.group(0)  # 未映射的占位符原样保留
-            val = values.get(key)
-            if val is None or val == "":
-                return m.group(0)  # 字段为空也保留占位符，便于人工补填
-            return str(val)
-        return TOKEN_RE.sub(repl, text)
-
     replaced = 0
     for p in _iter_paragraphs(doc):
-        full = "".join(r.text for r in p.runs)
-        has_token = "【" in full and "】" in full
-        has_label = _LABEL_COMBO_RE.search(full) is not None
-        if not has_token and not has_label:
-            continue
-        new_text = substitute(full)
-        if new_text == full:
-            continue
         runs = p.runs
         if not runs:
             continue
-        for r in runs[1:]:
+        full = "".join(r.text for r in runs)
+        spans = _build_spans(full, token_map, values)
+        if not spans:
+            continue
+
+        # 每个 run 在 full 中的字符区间
+        run_spans = []
+        pos = 0
+        for r in runs:
+            n = len(r.text)
+            run_spans.append((pos, pos + n))
+            pos += n
+
+        # 受影响的 run 索引（与任一替换区间重叠）
+        affected = set()
+        for s, e, _ in spans:
+            for ri, (rs, re_) in enumerate(run_spans):
+                if rs < e and s < re_:
+                    affected.add(ri)
+        if not affected:
+            continue
+
+        # 重建整段：按"原文→替换"分段，未受影响的 run 原样保留
+        # 先收集每个 run 的 rPr 格式模板
+        rprs = []
+        for r in runs:
+            rPr = r._element.find(qn("w:rPr"))
+            rprs.append(copy.deepcopy(rPr) if rPr is not None else None)
+
+        spans_sorted = sorted(spans, key=lambda x: x[0])
+        # 分段：光标在 full 上推进，span 之外的为"保留"段，span 内为"替换"段
+        segments = []  # (text, 源run索引)
+        cursor = 0
+        for s, e, rep in spans_sorted:
+            if s < cursor:
+                continue  # 跳过重叠/已覆盖的 span
+            if cursor < s:
+                # 保留段 [cursor, s)，拆回原 run
+                _append_equal_segments(segments, full, cursor, s, run_spans)
+            # 替换段 [s, e)，用覆盖 s 的 run 的格式
+            ri = next((i for i, (rs, re_) in enumerate(run_spans) if rs <= s < re_), 0)
+            if rep != full[s:e]:
+                segments.append((rep, ri))
+            cursor = e
+        if cursor < len(full):
+            _append_equal_segments(segments, full, cursor, len(full), run_spans)
+
+        # 合并相邻同源 run 的片段
+        merged = []
+        for txt, ri in segments:
+            if not txt:
+                continue
+            if merged and merged[-1][1] == ri:
+                merged[-1][0] += txt
+            else:
+                merged.append([txt, ri])
+
+        # 删除所有原 run，按 merged 重建
+        for r in runs:
             r._element.getparent().remove(r._element)
-        runs[0].text = new_text
+        for txt, ri in merged:
+            _append_run(p, txt, rprs[ri])
         replaced += 1
 
     doc.save(out_path)
     return replaced
+
+
+def _append_equal_segments(segments, full, start, end, run_spans):
+    """把 full 的 [start, end) 保留段按原 run 边界切分，追加为 (原文, 源run索引) 片段。"""
+    s = start
+    for ri, (rs, re_) in enumerate(run_spans):
+        if re_ <= s:
+            continue
+        if rs >= end:
+            break
+        cut = min(re_, end)
+        if cut > s:
+            segments.append((full[s:cut], ri))
+        s = cut
+        if s >= end:
+            break
 
 
 # ---------------- 字段定义（网页表单与模板映射共用） ----------------
@@ -177,8 +287,8 @@ def _set_eastasia(run, font):
 def fix_eastasia_fonts(path, body_font="仿宋", title_font="宋体"):
     """修复 textutil 转换 .doc→.docx 后中文字体标记丢失的问题。
 
-    首个非空段落视为标题（宋体加粗），其余正文统一设中文字体（默认仿宋）。
-    西文字体与字号保留转换结果。
+    仅当 run 缺少中文字体（w:eastAsia 为空）时才补默认字体，绝不覆盖已有字体、
+    字号、加粗等格式 —— 保证 WPS 另存的 .docx 等格式完整的模板不被改动。
     """
     doc = Document(path)
     title_done = False
@@ -186,13 +296,33 @@ def fix_eastasia_fonts(path, body_font="仿宋", title_font="宋体"):
         text = "".join(r.text for r in p.runs)
         if not text.strip():
             continue
+        for r in p.runs:
+            if _get_eastasia(r) is None:
+                _set_eastasia(r, title_font if not title_done else body_font)
         if not title_done:
-            for r in p.runs:
-                _set_eastasia(r, title_font)
-                if r.font.bold is None:
-                    r.font.bold = True
             title_done = True
-        else:
-            for r in p.runs:
-                _set_eastasia(r, body_font)
     doc.save(path)
+
+
+def inject_header_logo(path, logo_png, width_inches=2.4):
+    """把律所 logo 注入 .docx 页眉首段（左对齐），用于 textutil 丢失 logo 的兜底。
+
+    若页眉已含图片则跳过；logo 宽度默认 2.4 英寸，可据实际调整。
+    """
+    from docx.shared import Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document(path)
+    section = doc.sections[0]
+    header = section.header
+    # 若页眉已有图片，则不重复注入
+    if header.paragraphs:
+        existing = "".join(p.text for p in header.paragraphs)
+        if header.paragraphs[0]._element.findall(".//" + qn("w:drawing")):
+            return False
+    p = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    run = p.add_run()
+    run.add_picture(logo_png, width=Inches(width_inches))
+    doc.save(path)
+    return True
