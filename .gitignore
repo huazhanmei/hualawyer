@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# iCloud 冲突副本
+*.icloud
+*conflicted*
+CONFLICT~*
+
+# 临时文件
+*.tmp
+*.log
+~$*
