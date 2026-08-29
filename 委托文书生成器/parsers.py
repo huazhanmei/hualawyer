@@ -30,6 +30,11 @@ _LABEL_WORDS = (
 _ADDR_FALLBACK_RE = re.compile(
     r"[\u4e00-\u9fa5]{2,8}市[\u4e00-\u9fa5A-Za-z0-9·]{1,30}(?:路|街|道|巷)[\u4e00-\u9fa5A-Za-z0-9]{1,20}号[\u4e00-\u9fa5A-Za-z0-9号座栋单元层室楼-]*"
 )
+# 自然人身份证住址兜底：省/市 + 路/街/道/巷/乡/镇/村/区/县/弄/里 + 号
+_PERSON_ADDR_RE = re.compile(
+    r"[\u4e00-\u9fa5]{2,8}市[\u4e00-\u9fa5A-Za-z0-9·]{1,40}(?:路|街|道|巷|弄|乡|镇|村|区|县|里)"
+    r"[\u4e00-\u9fa5A-Za-z0-9]{1,20}号[\u4e00-\u9fa5A-Za-z0-9号座栋单元层室楼-]*"
+)
 # 兜底：职务标签缺失时（人员区"姓名+职务"同行布局），按常见职务词匹配
 # 注意：Python re 的 alternation 按列表顺序优先匹配，所以长的词必须排在前面，
 # 否则短词（如"董事"）会先吃掉匹配位，导致"执行董事兼总经理"被截成"董事"。
@@ -89,6 +94,104 @@ def detect_type(lines):
     return "unknown"
 
 
+# 身份证住址标签（"址"字易被 OCR 识别成相近字）+ 后续字段标签（用于截断地址串）
+_ADDR_LABEL = r"(?:住址|住所|住扯|住让|住壮|住仕|住此|住止|住坧)"
+_ID_LOOK = r"(?=公民身份号码|身份证号|身份证号码|证件号码|签发机关|有效期限|[1-9]\d{16}[\dXx]|$)"
+_ADDR_STOP_WORDS = (
+    "公民身份号码", "身份证号", "身份证号码", "证件号码", "签发机关", "有效期限",
+    "居民身份证", "姓名", "性别", "民族", "出生", "常住户口",
+)
+
+
+def _clean_addr(s):
+    """清洗地址文本：去空白、去掉开头残留标签、截断混入的后续标签词。"""
+    if not s:
+        return None
+    s = re.sub(r"[\s　\n]+", "", s)
+    # 去掉开头可能残留的"住址/住所"等标签（如"出生锚点"策略捕获到"住址"前缀）
+    s = re.sub(r"^(?:住址|住所|住扯|住让|住壮|住仕|住此|住止|住坧)[：: ]?", "", s)
+    s = re.sub(r"^[址扯让壮仕此坧]+", "", s)
+    s = s.strip("：:，,、。.·")
+    # 截断混入的后续标签词（地址中不会出现这些词）
+    for w in _ADDR_STOP_WORDS:
+        i = s.find(w)
+        if i == 0:
+            return None
+        if i > 0:
+            s = s[:i]
+    # 去掉前面残留的非中文噪声（如地图图标 ◎ 等）
+    s = re.sub(r"^[^一-龥]+", "", s)
+    return s if 4 <= len(s) <= 80 else None
+
+
+def _addr_tail(joined):
+    """折行续段：身份证号之后若紧跟着地址后半段（OCR 顺序异常），返回该续段。"""
+    m = ID_RE.search(joined)
+    if not m:
+        return None
+    rest = joined[m.end():].lstrip("\n ")
+    if not rest:
+        return None
+    first = rest.split("\n", 1)[0]
+    first = re.sub(r"[\s　]+", "", first)
+    if any(w in first for w in _ADDR_STOP_WORDS):
+        return None
+    # 若"住址"标签或省份/城市开头，说明是完整地址（证号在住址前），不是续段
+    if re.search(_ADDR_LABEL, first):
+        return None
+    if re.match(r"^[\u4e00-\u9fa5]{0,6}(?:省|市|自治区|特别行政区)", first):
+        return None
+    if ID_RE.search(first) or re.search(r"\d{17}[\dXx]", first):
+        return None
+    # 地址续段特征：以 号/室/单元/栋/层/楼/村/乡/镇/路/街/道/巷/弄/里/组/队 结尾
+    if re.search(r"(?:号|室|单元|栋|层|楼|村|乡|镇|路|街|道|巷|弄|里|组|队)$", first):
+        first = re.sub(r"^[^一-龥0-9A-Za-z]+", "", first)
+        if 2 <= len(first) <= 40:
+            return first
+    return None
+
+
+def _extract_person_address(joined, lines):
+    """多策略提取身份证住址，返回地址字符串或 None。
+
+    真实照片 OCR 常见问题：① 住址跨行折行；② "址"字识别成"扯/让"等；③ 标签缺失；
+    ④ 折行后住址后半段出现在身份证号之后。按 标签→出生锚点→格式兜底 依次尝试。
+    """
+    base = None
+    # 策略1：住址标签 → 到 身份证号/公民身份号码/背面字段/串尾
+    m = re.search(_ADDR_LABEL + r"[：: ]?" + r"(.*?)" + _ID_LOOK, joined, re.S)
+    if m:
+        base = _clean_addr(m.group(1))
+
+    # 策略2：无标签兜底，取"出生"到身份证号之间的文本
+    if not base:
+        m = re.search(r"出生[：: ]?(.*?)" + _ID_LOOK, joined, re.S)
+        if m:
+            raw = m.group(1)
+            # 去掉开头的出生日期（如 1984年9月27日 / 1984.9.27 / 19840927）
+            raw = re.sub(r"^(?:19|20)\d{2}(?:年|\.|-|/)?\d{1,2}(?:月|\.|-|/)?\d{1,2}日?", "", raw)
+            base = _clean_addr(raw)
+
+    # 策略3：中文地址格式兜底（逐行扫描）
+    if not base:
+        for ln in lines:
+            ln_clean = re.sub(r"[\s　]+", "", ln)
+            m2 = _PERSON_ADDR_RE.search(ln_clean)
+            if m2:
+                base = _clean_addr(m2.group(0))
+                if base:
+                    break
+
+    if not base:
+        return None
+
+    # 折行续段合并：身份证号之后出现地址后半段时拼接
+    tail = _addr_tail(joined)
+    if tail and tail not in base:
+        base = base + tail
+    return base
+
+
 def parse_person(lines):
     joined = _joined(lines)
     fields = {}
@@ -117,13 +220,10 @@ def parse_person(lines):
     if m:
         fields["client_gender"] = m.group(1)
 
-    # 住址：从"住址"标签起，跨行到"公民身份号码"、身份证号或串尾
-    m = re.search(
-        r"住址[：:]?(.*?)(?=公民身份号码|[1-9]\d{16}[\dXx]|$)", joined, re.S)
-    if m and m.group(1):
-        addr = re.sub(r"[\s　\n]+", "", m.group(1))
-        if 4 <= len(addr) <= 60:
-            fields["client_address"] = addr
+    # 住址：多策略提取（标签 / 出生锚点 / 地址格式兜底）
+    addr = _extract_person_address(joined, lines)
+    if addr:
+        fields["client_address"] = addr
 
     return fields
 
