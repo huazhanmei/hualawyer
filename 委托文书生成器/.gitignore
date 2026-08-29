@@ -1,0 +1,15 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# 运行时产物（不提交）
+output/
+uploads/
+mappings.json
+
+# macOS
+.DS_Store
+
+# 测试数据
+make_test_images.py
